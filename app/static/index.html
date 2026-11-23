@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Credit Policy Assistant</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f5f5f5; color: #222; }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 20px 16px; }
+  header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; }
+  h1 { margin: 0; font-size: 1.4rem; }
+  .muted { color: #666; font-size: .9rem; }
+  a { color: #c8102e; }
+  .layout { display: grid; grid-template-columns: 1fr 260px; gap: 20px; margin-top: 16px; }
+  @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
+  .card { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-bottom: 10px; }
+  form { display: flex; gap: 8px; }
+  input[type=text] { flex: 1; padding: 10px; font-size: 1rem; border: 1px solid #ccc; border-radius: 6px; }
+  button { font: inherit; cursor: pointer; }
+  .ask { padding: 0 18px; background: #c8102e; color: #fff; border: 0; border-radius: 6px; }
+  .ask:disabled { opacity: .6; }
+  h3 { font-size: .8rem; text-transform: uppercase; color: #666; margin: 18px 0 6px; }
+  #qlist { list-style: none; padding: 0; margin: 0; }
+  #qlist li { padding: 8px 12px; border-bottom: 1px solid #eee; cursor: pointer; }
+  #qlist li:hover { background: #f0f0f0; }
+  #qlist li:last-child { border-bottom: 0; }
+  #qlist .tag { float: right; color: #666; font-size: .8rem; }
+  .status { font-weight: bold; margin: 0 0 6px; }
+  .ok { color: #146c43; } .warn { color: #8a5a00; } .err { color: #a4262c; }
+  .source-text { white-space: pre-wrap; font-size: .9rem; color: #555; margin: 6px 0 0; }
+  .doc button { background: none; border: 0; color: #666; padding: 0; margin-left: 10px; }
+  .doc.cited { border-color: #c8102e; }
+  #msg { font-size: .85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Credit Policy Assistant</h1>
+      <div class="muted">Ask about synthetic banking policies. Answers cite the document and page.</div>
+    </div>
+    <div class="muted"><a href="/docs" target="_blank">API docs</a> · <span id="health">checking…</span></div>
+  </header>
+
+  <div class="layout">
+    <main>
+      <form id="form">
+        <input id="q" type="text" maxlength="1000" placeholder="Ask a question about lending, credit risk or loan documentation" autofocus>
+        <button class="ask" id="go" type="submit">Ask</button>
+      </form>
+
+      <h3>Or try one of these</h3>
+      <div class="card" style="padding:0"><ul id="qlist"></ul></div>
+
+      <div id="out"></div>
+    </main>
+
+    <aside>
+      <h3 style="margin-top:0">Policy documents</h3>
+      <button id="uploadbtn" type="button">+ Upload a PDF</button>
+      <input id="file" type="file" accept=".pdf" hidden>
+      <p id="msg"></p>
+      <div id="docs"></div>
+    </aside>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function el(tag, text, cls) {
+  const n = document.createElement(tag);
+  if (text !== undefined) n.textContent = text;
+  if (cls) n.className = cls;
+  return n;
+}
+
+const QUESTIONS = [
+  ["What is the minimum DSCR for commercial loans?", "Direct"],
+  ["How often are loans rated Watch reviewed?", "Direct"],
+  ["How long are loan files retained after maturity or payoff?", "Direct"],
+  ["Above what loan amount is Credit Committee approval required?", "Direct"],
+  ["How often are Pass-rated loans reviewed, and what minimum provision applies to Substandard loans?", "Multiple passages"],
+  ["What appraisal requirement applies to real estate collateral, and what is the maximum loan-to-value for owner-occupied commercial real estate?", "Two documents"],
+  ["What is the current interest rate on a 30-year fixed mortgage?", "Should decline"],
+  ["What is the employee remote work policy?", "Should decline"],
+];
+
+QUESTIONS.forEach(([q, tag]) => {
+  const li = el("li", q);
+  li.appendChild(el("span", tag, "tag"));
+  li.onclick = () => { $("q").value = q; ask(q); };
+  $("qlist").appendChild(li);
+});
+
+async function loadHealth() {
+  try {
+    const h = await (await fetch("/health")).json();
+    $("health").textContent = h.index_ready ? `${h.indexed_chunks} passages indexed` : "no documents indexed";
+  } catch { $("health").textContent = "server unreachable"; }
+}
+
+async function loadDocs() {
+  const box = $("docs");
+  box.replaceChildren();
+  try {
+    const docs = await (await fetch("/documents")).json();
+    docs.forEach((d) => {
+      const c = el("div", undefined, "card doc");
+      c.dataset.file = d.filename;
+      c.appendChild(el("b", d.title + (d.indexed ? "" : " (not indexed)")));
+      c.appendChild(el("div", d.filename + " · " + d.pages + " pg", "muted"));
+      const open = el("a", "Open");
+      open.href = "/pdfs/" + encodeURIComponent(d.filename);
+      open.target = "_blank";
+      c.appendChild(open);
+      const rm = el("button", "Remove");
+      rm.onclick = () => removeDoc(d.filename);
+      c.appendChild(rm);
+      box.appendChild(c);
+    });
+  } catch { box.textContent = "Could not load documents."; }
+}
+
+async function upload(file) {
+  if (!file) return;
+  $("msg").textContent = "Indexing…";
+  $("msg").className = "";
+  const r = await fetch("/documents/" + encodeURIComponent(file.name), { method: "PUT", body: file });
+  const body = await r.json().catch(() => ({}));
+  $("msg").textContent = r.ok ? `${file.name}: ${body.status}` : body.detail || "Upload failed.";
+  $("msg").className = r.ok ? "ok" : "err";
+  $("file").value = "";
+  loadDocs();
+  loadHealth();
+}
+
+async function removeDoc(name) {
+  if (!confirm("Remove " + name + "?")) return;
+  const r = await fetch("/documents/" + encodeURIComponent(name), { method: "DELETE" });
+  $("msg").textContent = r.ok ? "Removed " + name : "Could not remove it.";
+  $("msg").className = r.ok ? "ok" : "err";
+  loadDocs();
+  loadHealth();
+}
+
+$("uploadbtn").onclick = () => $("file").click();
+$("file").onchange = (e) => upload(e.target.files[0]);
+
+function showResult(d) {
+  const out = $("out");
+  out.replaceChildren();
+  const cited = new Set(d.sources.map((s) => s.filename));
+  document.querySelectorAll(".doc").forEach((c) => c.classList.toggle("cited", cited.has(c.dataset.file)));
+
+  const card = el("div", undefined, "card");
+  if (d.abstained) {
+    card.appendChild(el("p", "Not enough evidence", "status warn"));
+    card.appendChild(el("p", d.answer));
+    card.appendChild(el("p", d.abstain_reason === "no_relevant_evidence"
+      ? `No passage was close enough to the question (closest distance ${d.best_score}).`
+      : "Passages were found, but the model said they don't contain the answer.", "muted"));
+  } else {
+    card.appendChild(el("p", "Answered from the documents", "status ok"));
+    card.appendChild(el("p", d.answer));
+  }
+  out.appendChild(card);
+
+  if (d.sources.length) {
+    out.appendChild(el("h3", "Sources"));
+    d.sources.forEach((s, i) => {
+      const c = el("div", undefined, "card");
+      c.appendChild(el("b", `[${i + 1}] ${s.filename}, page ${s.page} `));
+      const a = el("a", "open page");
+      a.href = "/pdfs/" + encodeURIComponent(s.filename) + "#page=" + s.page;
+      a.target = "_blank";
+      c.appendChild(a);
+      c.appendChild(el("span", ` · distance ${s.score.toFixed(3)}`, "muted"));
+      c.appendChild(el("p", s.text, "source-text"));
+      out.appendChild(c);
+    });
+  }
+}
+
+function showError(message) {
+  const card = el("div", undefined, "card");
+  card.appendChild(el("p", "Something went wrong", "status err"));
+  card.appendChild(el("p", message));
+  $("out").replaceChildren(card);
+}
+
+async function ask(q) {
+  q = q.trim();
+  if (!q) return;
+  $("go").disabled = true;
+  $("out").replaceChildren(el("p", "Searching…", "muted"));
+  try {
+    const r = await fetch("/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q }) });
+    const body = await r.json().catch(() => ({}));
+    if (r.ok) showResult(body);
+    else showError(typeof body.detail === "string" ? body.detail : "Request failed (" + r.status + ").");
+  } catch { showError("Could not reach the server."); }
+  $("go").disabled = false;
+}
+
+$("form").onsubmit = (e) => { e.preventDefault(); ask($("q").value); };
+
+loadHealth();
+loadDocs();
+</script>
+</body>
+</html>
